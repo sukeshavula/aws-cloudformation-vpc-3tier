@@ -1,48 +1,25 @@
 # aws-cloudformation-vpc-3tier
 
-A production-style 3-tier web platform on AWS, defined in a single CloudFormation template.
+The standard 3-tier setup I end up building over and over at work, as a single CloudFormation template:
+
+- VPC across 2 AZs with public / app / DB subnets
+- Internet-facing ALB in the public subnets
+- Auto Scaling group (Amazon Linux 2023 + nginx) in the app subnets
+- RDS MySQL 8.0 in the DB subnets, which have no route to the internet at all
 
 ![cfn-lint](https://github.com/sukeshavula/aws-cloudformation-vpc-3tier/actions/workflows/validate.yml/badge.svg)
 
-## Why this exists
-
-Most of my day-to-day work is running AWS infrastructure for a compliance platform. This repo rebuilds the core pattern from scratch: isolated network tiers, a load-balanced and self-healing app tier, and an encrypted database nobody can reach from the internet. It's written as code, so the whole thing can be created, reviewed and torn down with one command.
-
-## Architecture
-
 ```mermaid
 flowchart LR
-  user([Internet]) -->|HTTP :80| alb[Application Load Balancer<br/>public subnets, 2 AZs]
+  user([Internet]) --> alb[ALB]
   subgraph VPC["VPC 10.20.0.0/16"]
-    alb -->|:80 from ALB SG only| asg[Auto Scaling group<br/>Amazon Linux 2023 + Nginx<br/>private app subnets]
-    asg -->|:3306 from app SG only| rds[(RDS MySQL 8.0<br/>encrypted, private DB subnets)]
-    asg -.->|outbound updates| nat[NAT gateway]
+    alb -->|80, from ALB SG only| asg[ASG / nginx]
+    asg -->|3306, from app SG only| rds[(RDS MySQL 8.0)]
+    asg -.-> nat[NAT GW]
   end
-  rds -.-> sm[Secrets Manager<br/>generated master password]
-  asg -.-> cw[CloudWatch alarms]
-  rds -.-> cw
 ```
 
-| Layer | Subnets | Route to internet |
-|---|---|---|
-| Public (ALB, NAT) | 10.20.0.0/24, 10.20.1.0/24 | Internet gateway |
-| App (EC2) | 10.20.2.0/24, 10.20.3.0/24 | NAT gateway (outbound only) |
-| Data (RDS) | 10.20.4.0/24, 10.20.5.0/24 | None |
-
-## Design decisions
-
-- **Security groups are chained, not opened by CIDR.** The app tier only accepts traffic from the ALB's security group, and the database only from the app tier's. Nothing in the app or DB tiers has a public IP.
-- **No SSH, no key pairs.** Instances get an IAM role with `AmazonSSMManagedInstanceCore`, so access goes through Session Manager and is logged in CloudTrail. Port 22 is never opened.
-- **IMDSv2 required** on every instance (`HttpTokens: required`), which blocks the SSRF-style metadata theft that IMDSv1 allowed.
-- **No database password in the template.** `ManageMasterUserPassword: true` has RDS generate the password and store it in Secrets Manager.
-- **Encryption everywhere:** EBS volumes and RDS storage are encrypted at rest.
-- **Self-healing app tier.** The ASG uses ELB health checks against `/health`, so an instance that stops serving is replaced automatically. Target-tracking scaling holds average CPU near 60%.
-- **Safe database changes.** `DeletionPolicy: Snapshot` takes a final snapshot if the stack or the DB is deleted. In `prod`, deletion protection and 7-day backups switch on through a condition.
-- **Cost-aware defaults for a lab:** one NAT gateway (production would use one per AZ), t3.micro instances, and single-AZ RDS unless `DBMultiAZ=true`.
-
 ## Deploy
-
-Prerequisites: AWS CLI v2 configured with an account where you can create VPC, EC2, ELB, RDS and IAM resources.
 
 ```bash
 aws cloudformation deploy \
@@ -56,34 +33,40 @@ aws cloudformation describe-stacks --stack-name three-tier-dev \
   --query "Stacks[0].Outputs" --output table --region ap-south-1
 ```
 
-Open `WebsiteURL` from the outputs. Refresh a few times and the instance ID and AZ change, showing the ALB spreading traffic across both instances.
+It takes about 10–15 minutes, mostly waiting on RDS. Hit `WebsiteURL` from the outputs and refresh a few times; the page shows which instance and AZ served it.
 
-The stack takes about 10–15 minutes, mostly for RDS.
-
-## Things to try
-
-- **Kill an instance:** terminate one web instance in the EC2 console and watch the ASG replace it, then watch the target group mark it healthy again.
-- **Reach an instance without SSH:** `aws ssm start-session --target <instance-id>`
-- **Read the DB password safely:** `aws secretsmanager get-secret-value --secret-id <DBSecretArn>`
-- **Trigger scaling:** run `stress` on an instance (via Session Manager) and watch the target-tracking policy add capacity.
-
-## Cost and teardown
-
-Running this costs money, mainly the NAT gateway and RDS instance (roughly USD 1.5–2 a day in ap-south-1 at the defaults). **Delete it when you're done:**
+**Delete it when you're done.** The NAT gateway and RDS instance cost money every hour they run:
 
 ```bash
 aws cloudformation delete-stack --stack-name three-tier-dev --region ap-south-1
 ```
 
-A final RDS snapshot is kept because of the `Snapshot` deletion policy. Delete it from the RDS console if you don't need it.
+(RDS keeps a final snapshot because of `DeletionPolicy: Snapshot`. Clean that up in the console.)
 
-## CI
+## Some choices, and why
 
-`.github/workflows/validate.yml` runs [cfn-lint](https://github.com/aws-cloudformation/cfn-lint) on every push and pull request, so template mistakes are caught before anything is deployed.
+- **SGs reference each other instead of CIDRs.** App only accepts traffic from the ALB SG, and DB only from the app SG.
+- **No SSH at all.** Instances get `AmazonSSMManagedInstanceCore`, so I use `aws ssm start-session` instead of opening port 22 and managing keys.
+- **IMDSv2 only** (`HttpTokens: required`).
+- **No DB password in the template or parameters.** `ManageMasterUserPassword: true` lets RDS put it in Secrets Manager.
+- **EBS and RDS are encrypted.**
+- **The ASG uses ELB health checks** on `/health`, so a dead instance gets replaced rather than just sitting there.
+- **One NAT gateway, not one per AZ.** Fine for a lab and cheaper. In prod I'd use one per AZ.
+- **`prod` gets 7-day backups and deletion protection** through the `IsProd` condition; dev doesn't.
 
-## What I'd add next
+## Things to try once it's up
 
-- HTTPS listener with an ACM certificate and HTTP→HTTPS redirect
-- One NAT gateway per AZ for production resilience
-- WAF on the ALB
-- Split into nested stacks (network / app / data) for independent lifecycle management
+- Terminate one of the web instances and watch the ASG bring a new one up
+- `aws ssm start-session --target <instance-id>`
+- `aws secretsmanager get-secret-value --secret-id <DBSecretArn>` to get the DB password
+- Load one instance with `stress` and watch target tracking scale out
+
+## Notes
+
+Status: template written and lint-checked in CI; I'm adding notes here as I deploy and test it.
+
+TODO:
+- [ ] HTTPS listener + ACM cert, redirect 80 → 443
+- [ ] NAT per AZ as a parameter
+- [ ] WAF on the ALB
+- [ ] Split into nested stacks (network / app / data)
