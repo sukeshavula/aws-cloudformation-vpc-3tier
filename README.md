@@ -1,6 +1,6 @@
 # aws-cloudformation-vpc-3tier
 
-The standard 3-tier setup I end up building over and over at work, as a single CloudFormation template:
+A standard 3-tier AWS setup as a single CloudFormation template:
 
 - VPC across 2 AZs with public / app / DB subnets
 - Internet-facing ALB in the public subnets
@@ -51,7 +51,7 @@ aws cloudformation delete-stack --stack-name three-tier-dev --region ap-south-1
 - **No DB password in the template or parameters.** `ManageMasterUserPassword: true` lets RDS put it in Secrets Manager.
 - **EBS and RDS are encrypted.**
 - **The ASG uses ELB health checks** on `/health`, so a dead instance gets replaced rather than just sitting there.
-- **One NAT gateway, not one per AZ.** Fine for a lab and cheaper. In prod I'd use one per AZ.
+- **One NAT gateway, not one per AZ.** Keeps dev cost down; production should use one per AZ.
 - **`prod` gets 7-day backups and deletion protection** through the `IsProd` condition; dev doesn't.
 
 ## Things to try once it's up
@@ -61,11 +61,8 @@ aws cloudformation delete-stack --stack-name three-tier-dev --region ap-south-1
 - `aws secretsmanager get-secret-value --secret-id <DBSecretArn>` to get the DB password
 - Load one instance with `stress` and watch target tracking scale out
 
-## Notes
+## TODO
 
-Status: template written and lint-checked in CI; I'm adding notes here as I deploy and test it.
-
-TODO:
 - [ ] HTTPS listener + ACM cert, redirect 80 → 443
 - [ ] NAT per AZ as a parameter
 - [ ] WAF on the ALB

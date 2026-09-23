@@ -148,7 +148,7 @@ Resources:
       SubnetId: !Ref PublicSubnetB
       RouteTableId: !Ref PublicRouteTable
 
-  # One NAT gateway keeps lab cost down; production would use one per AZ.
+  # One NAT gateway keeps dev cost down; production would use one per AZ.
   NatEIP:
     Type: AWS::EC2::EIP
     DependsOn: VPCGatewayAttachment
